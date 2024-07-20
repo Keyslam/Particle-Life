@@ -9,8 +9,8 @@ end
 
 
 function love.conf(t)
-    t.window.width = 1080
-    t.window.height = 1080
+    t.window.width = 1280
+    t.window.height = 720
 
     t.window.msaa = 16
     t.window.vsync = 0

@@ -1,209 +1,220 @@
-local colors = {
-    { love.math.colorFromBytes(234, 89, 89) },
-    { love.math.colorFromBytes(234, 168, 86) },
-    { love.math.colorFromBytes(239, 215, 127) },
-    { love.math.colorFromBytes(143, 217, 86) },
-    { love.math.colorFromBytes(99, 216, 162) },
-    { love.math.colorFromBytes(73, 142, 188) },
-    { love.math.colorFromBytes(106, 85, 209) },
-}
+function love.load()
+	move = love.graphics.newComputeShader([[
+		struct Particle {
+			vec2 position;
+			vec2 velocity;
+			uint kind;
+		};
 
-local function createAttractionMatrix()
-    local attractionMatrix = {}
+		buffer Particles {
+			Particle particles[];
+		};
 
-    for i = 1, #colors do
-        attractionMatrix[i] = {}
-        for j = 1, #colors do
-            attractionMatrix[i][j] = love.math.random() * 2 - 1
-        end
-    end
+		uniform float dt;
+		uniform uint count;
 
+		layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+		void computemain() {
+			uint index = love_GlobalThreadID.x;
 
+			if (index >= count) {
+				return;
+			}
 
-    return attractionMatrix
+			particles[index].position += particles[index].velocity * dt;
+
+			vec2 position = particles[index].position;
+			if (position.x < 0.) particles[index].position.x += 10240.;
+			if (position.x > 10240.) particles[index].position.x -= 10240.;
+			if (position.y < 0.) particles[index].position.y += 5760.;
+			if (position.y > 5760.) particles[index].position.y -= 5760.;
+		}
+	]])
+
+	force = love.graphics.newComputeShader([[
+		struct Particle {
+			vec2 position;
+			vec2 velocity;
+			uint kind;
+		};
+
+		buffer Particles {
+			Particle particles[];
+		};
+
+		uniform float dt;
+		uniform float frictionFactor;
+		uniform uint count;
+
+		uniform float attractionmatrix[49];
+
+		float calculateforce(float r, float a) {
+			float beta = 0.3f;
+
+			if (r < beta) {
+				return r / beta - 1.;
+			} else if (beta < r && r < 1.) {
+				return a * (1. - abs(2. * r - 1. - beta) / (1. - beta)); 
+			} else {
+				return 0.;
+			}
+		}
+
+		layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+		void computemain() {
+			uint index = love_GlobalThreadID.x;
+
+			if (index >= count) {
+				return;
+			}
+
+			vec2 force;
+
+			for (uint o_index; o_index < count; o_index++) {
+				Particle o_particle = particles[o_index];
+
+				vec2 delta = o_particle.position - particles[index].position;
+				delta.x = delta.x - 1. * floor((delta.x + 10240. / 2.) / 10240.);
+				delta.y = delta.y - 1. * floor((delta.y + 5760. / 2.) / 5760.);
+
+				float distance = sqrt(delta.x * delta.x + delta.y * delta.y);
+
+				if (distance > 0. && distance < 200.) {
+					float a = attractionmatrix[particles[index].kind + o_particle.kind * 3];
+					float f = calculateforce(distance / 200., a);
+
+					force += delta / distance * f;
+				}
+			}
+
+			force *= 200. * 10.;
+
+			particles[index].velocity *= frictionFactor;
+			particles[index].velocity += force * dt;
+		}
+	]])
+
+	renderer = love.graphics.newShader([[
+		#pragma language glsl4
+
+		struct Particle {
+			vec2 position;
+			vec2 velocity;
+			uint kind;
+		};
+
+		readonly buffer Particles {
+			Particle particles[];
+		};
+
+		#ifdef VERTEX
+			vec4 colorbytes(float r, float g, float b) {
+				return vec4(r / 255., g / 255., b / 255., 1.);
+			}
+
+			vec4 colors[] = {
+				colorbytes(234, 89, 89),
+				colorbytes(234, 168, 86),
+				colorbytes(239, 215, 127),
+				colorbytes(143, 217, 86),
+				colorbytes(99, 216, 162),
+				colorbytes(99, 216, 162),
+				colorbytes(99, 216, 162),
+				colorbytes(99, 216, 162),
+				colorbytes(73, 142, 188),
+				colorbytes(106, 85, 209)
+			};
+
+			out vec4 vColor;
+			
+			vec4 position(mat4 transform_projection, vec4 vertex_position) {
+				gl_PointSize = 1;
+				uint index = love_VertexID;
+				vColor = colors[particles[index].kind];
+				return transform_projection * vec4(particles[index].position, 0., 1.);
+			}
+		#endif
+
+		#ifdef PIXEL
+			in vec4 vColor;
+			vec4 effect(vec4 color, Image tex, vec2 texture_coords, vec2 screen_coords) {
+				return vColor;
+			}
+		#endif
+	]])
+
+	format = {
+		{ name = "position", format = "floatvec2" },
+		{ name = "velocity", format = "floatvec2" },
+		{ name = "kind", format = "uint32" },
+	}
+
+	count = 20000
+	particles = love.graphics.newBuffer(format, count, { shaderstorage = true })
+
+	move:send("Particles", particles)
+	move:send("count", count)
+
+	force:send("Particles", particles)
+	force:send("count", count)
+
+	renderer:send("Particles", particles)
+
+	local data = {}
+	local width, height = love.graphics.getDimensions()
+	local r, rn = love.math.random, love.math.randomNormal
+	for i = 1, count do
+		table.insert(data, {
+			r(width * 8), r(height * 8),
+			rn(100), rn(100),
+			r() * 10
+		})
+	end
+
+	particles:setArrayData(data)
+
+	local attractionmatrix = {}
+	for i = 1, 7 * 7 do
+		attractionmatrix[i] = love.math.random() * 2 - 1;
+	end
+	force:send("attractionmatrix", unpack(attractionmatrix))
+
+	mesh = love.graphics.newMesh({
+		{ name = "VertexPosition", format = "float"}
+	}, count, "points")
 end
 
-local particles = {}
-local attractionMatrix = createAttractionMatrix()
-local frictionHalfLife = 0.04
-local maxRadius = 0.2
-local forceFactor = 10
-
-local canvas = love.graphics.newCanvas(
-    love.graphics.getWidth(),
-    love.graphics.getHeight()
-)
-
-local blurCanvas = love.graphics.newCanvas(
-    love.graphics.getWidth(),
-    love.graphics.getHeight()
-)
-local hblurCanvas = love.graphics.newCanvas(
-    love.graphics.getWidth(),
-    love.graphics.getHeight()
-)
-local vblurCanvas = love.graphics.newCanvas(
-    love.graphics.getWidth(),
-    love.graphics.getHeight()
-)
-
-local h_blur = love.graphics.newShader("h_blur.glsl")
-local v_blur = love.graphics.newShader("v_blur.glsl")
-
-local isRunning = true
-
-local function force(r, a)
-    local beta = 0.3
-
-    if (r < beta) then
-        return r / beta - 1
-    elseif (beta < r and r < 1) then
-        return a * (1 - math.abs(2 * r - 1 - beta) / (1 - beta))
-    else
-        return 0
-    end
-end
-
-local function createParticle(x, y, kind)
-    local particle = {
-        x = x,
-        y = y,
-        vx = 0,
-        vy = 0,
-        kind = kind,
-    }
-
-    table.insert(particles, particle)
-end
-
-for _ = 1, 1500 do
-    local x = love.math.random()
-    local y = love.math.random()
-
-    local kind = math.floor(love.math.random() * #colors) + 1
-
-    createParticle(x, y, kind)
-end
+local running = true
 
 function love.update(dt)
-    if (isRunning) then
-        return
-    end
+	dt = math.min(dt, 1 / 60)
 
-    -- if love.keyboard.isDown("a") then
-    dt = 0.01
-    -- end
+	move:send("dt", dt)
 
-    -- dt = math.min(1 / 60, 100)
+	local frictionHalfLife = 0.04
+	local frictionFactor = math.pow(0.5, dt / frictionHalfLife)
 
-    local frictionFactor = math.pow(0.5, dt / frictionHalfLife)
+	force:send("dt", dt)
+	force:send("frictionFactor", frictionFactor)
 
-    for _, particle in ipairs(particles) do
-        local forceX = 0
-        local forceY = 0
-
-        for _, oparticle in ipairs(particles) do
-            if (particle == oparticle) then
-                goto continue
-            end
-
-            local dx = oparticle.x - particle.x
-            local dy = oparticle.y - particle.y
-
-            dx = dx - 1 * math.floor((dx + 1 / 2) / 1)
-            dy = dy - 1 * math.floor((dy + 1 / 2) / 1)
-
-            local distance = math.sqrt(dx * dx + dy * dy)
-
-            if (distance > 0 and distance < maxRadius) then
-                local f = force(distance / maxRadius, attractionMatrix[particle.kind][oparticle.kind])
-
-                forceX = forceX + dx / distance * f
-                forceY = forceY + dy / distance * f
-            end
-
-            ::continue::
-        end
-
-        forceX = forceX * maxRadius * forceFactor
-        forceY = forceY * maxRadius * forceFactor
-
-        particle.vx = particle.vx * frictionFactor
-        particle.vy = particle.vy * frictionFactor
-
-        particle.vx = particle.vx + forceX * dt
-        particle.vy = particle.vy + forceY * dt
-    end
-
-    for _, particle in ipairs(particles) do
-        particle.x = particle.x + particle.vx * dt
-        particle.y = particle.y + particle.vy * dt
-
-        if (particle.x > 1) then particle.x = particle.x - 1 end
-        if (particle.x < 0) then particle.x = particle.x + 1 end
-        if (particle.y > 1) then particle.y = particle.y - 1 end
-        if (particle.y < 0) then particle.y = particle.y + 1 end
-    end
+	if (running) then
+		local groupCount = math.ceil(count / move:getLocalThreadgroupSize())
+		love.graphics.dispatchThreadgroups(force, groupCount)
+		love.graphics.dispatchThreadgroups(move, groupCount)
+	end
 end
 
 function love.draw()
-    love.graphics.setCanvas(canvas)
-    love.graphics.clear(0, 0, 0, 0)
+	love.graphics.setShader(renderer)
+	love.graphics.scale(0.125, 0.125)
+	love.graphics.draw(mesh)
+	love.graphics.setShader()
 
-    for _, particle in ipairs(particles) do
-        love.graphics.setColor(colors[particle.kind])
-        love.graphics.circle(
-            "fill",
-            particle.x * love.graphics.getWidth(),
-            particle.y * love.graphics.getHeight(),
-            4
-        )
-    end
-
-    love.graphics.setCanvas(blurCanvas)
-    love.graphics.clear(0, 0, 0, 0)
-    love.graphics.setBlendMode("lighten", "premultiplied")
-    for _, particle in ipairs(particles) do
-        love.graphics.setColor(colors[particle.kind])
-        love.graphics.circle(
-            "fill",
-            particle.x * love.graphics.getWidth(),
-            particle.y * love.graphics.getHeight(),
-            30
-        )
-    end
-    love.graphics.setBlendMode("alpha", "alphamultiply")
-    love.graphics.setColor(1, 1, 1, 1)
-
-    love.graphics.setCanvas(hblurCanvas)
-    love.graphics.setShader(h_blur)
-    love.graphics.clear(0, 0, 0, 0)
-    love.graphics.draw(blurCanvas)
-    love.graphics.setShader()
-    love.graphics.setCanvas()
-    
-    love.graphics.setCanvas(vblurCanvas)
-    love.graphics.setShader(v_blur)
-    love.graphics.clear(0, 0, 0, 0)
-    love.graphics.draw(hblurCanvas)
-    love.graphics.setShader()
-    love.graphics.setCanvas()
-    
-    love.graphics.setCanvas()
-
-    love.graphics.clear(0.05, 0.05, 0.05, 0)
-
-    love.graphics.setColor(1, 1, 1, 0.1)
-    love.graphics.draw(vblurCanvas)
-    
-    -- love.graphics.setBlendMode("lighten", "premultiplied")
-    love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.draw(canvas, 0, 0, 0)
-
+	love.window.setTitle(love.timer.getFPS())
 end
 
 function love.keypressed(key)
-    if (key == "space") then
-        isRunning = not isRunning
-    end
+	if (key == "space") then
+		running = not running
+	end
 end
